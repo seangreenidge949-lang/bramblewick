@@ -8,7 +8,9 @@ A small rabbit companion for Claude Code. She sits quietly, watches what you're 
 
 ## How it works
 
-Every 30 minutes, Bramblewick reads your current session transcript, passes the recent conversation to Claude Haiku, and generates one contextual comment — max 50 characters, no empty encouragement, just honest observations.
+Every 2–5 messages (random), Bramblewick reads your current session transcript, passes the recent conversation to Claude Haiku, and generates one contextual comment — max 50 characters, no empty encouragement, just honest observations.
+
+The comment appears in your status bar once, then disappears. She doesn't repeat herself.
 
 Between triggers, she costs zero tokens. She only speaks when she has something to say.
 
@@ -29,19 +31,9 @@ bash install.sh
 
 That's it. Bramblewick will appear the next time your status bar refreshes.
 
-## Adjust trigger interval
+## Adjust trigger frequency
 
-Default is 30 minutes. To change it, add to `~/.claude/settings.json`:
-
-```json
-{
-  "env": {
-    "BRAMBLEWICK_INTERVAL": "1800"
-  }
-}
-```
-
-Unit is seconds. `900` = 15 min, `3600` = 1 hour.
+Default is every 2–5 messages (random). No configuration needed — the randomness keeps it feeling natural.
 
 ## Manual reset
 

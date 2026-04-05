@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
 Bramblewick — 陪伴程序员工作的小兔子
-每隔 30 分钟读取当前会话 transcript，用 Haiku 生成一句有情境的碎碎念。
+
+两种调用模式：
+  python3 bramblewick.py tick   # UserPromptSubmit hook 调用：计数+1，到阈值时生成
+  python3 bramblewick.py show   # statusLine 调用：取走 pending_text（取一次就清空）
 """
 import os
 import sys
 import json
 import glob
+import random
 import subprocess
-from datetime import datetime, timezone, timedelta
 
-# --- 配置 ---
-INTERVAL_SECONDS = int(os.environ.get("BRAMBLEWICK_INTERVAL", "1800"))  # 默认 30 分钟
 STATE_FILE = os.path.expanduser("~/.claude/bramblewick-state.json")
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
-MAX_MESSAGES = 10       # 最近读取的消息条数
-ASSISTANT_PREVIEW = 200  # assistant 消息最多读取的字符数
+MAX_MESSAGES = 10
+ASSISTANT_PREVIEW = 200
 
 
 def load_state():
@@ -26,27 +27,12 @@ def load_state():
         return {}
 
 
-def save_state(text):
-    now = datetime.now(timezone.utc).isoformat()
+def save_state(state):
     with open(STATE_FILE, "w") as f:
-        json.dump({"last_time": now, "last_text": text}, f, ensure_ascii=False)
-
-
-def seconds_since_last(state):
-    last = state.get("last_time")
-    if not last:
-        return float("inf")
-    try:
-        last_dt = datetime.fromisoformat(last)
-        now = datetime.now(timezone.utc)
-        return (now - last_dt).total_seconds()
-    except Exception:
-        return float("inf")
+        json.dump(state, f, ensure_ascii=False)
 
 
 def cwd_to_project_dir(cwd):
-    """将当前目录路径转换为 ~/.claude/projects/ 下的目录名"""
-    # /Users/siyucheng/foo → -Users-siyucheng-foo
     encoded = cwd.replace("/", "-")
     if not encoded.startswith("-"):
         encoded = "-" + encoded
@@ -54,19 +40,16 @@ def cwd_to_project_dir(cwd):
 
 
 def find_latest_transcript(cwd):
-    """找到当前 cwd 对应的最新 transcript .jsonl 文件"""
     project_dir = cwd_to_project_dir(cwd)
     if not os.path.isdir(project_dir):
         return None
     files = glob.glob(os.path.join(project_dir, "*.jsonl"))
     if not files:
         return None
-    # 按修改时间排序，取最新
     return max(files, key=os.path.getmtime)
 
 
 def extract_context(transcript_path):
-    """从 transcript 提取最近 MAX_MESSAGES 条消息"""
     try:
         with open(transcript_path, "r") as f:
             lines = f.readlines()
@@ -83,7 +66,6 @@ def extract_context(transcript_path):
         except Exception:
             continue
 
-        msg_type = obj.get("type")
         message = obj.get("message", {})
         if not isinstance(message, dict):
             continue
@@ -92,12 +74,9 @@ def extract_context(transcript_path):
         content = message.get("content", "")
 
         if role == "user":
-            # user 消息：提取文本内容，全量
             if isinstance(content, list):
-                texts = []
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "text":
-                        texts.append(c.get("text", ""))
+                texts = [c.get("text", "") for c in content
+                         if isinstance(c, dict) and c.get("type") == "text"]
                 text = " ".join(texts).strip()
             else:
                 text = str(content).strip()
@@ -105,12 +84,9 @@ def extract_context(transcript_path):
                 messages.insert(0, f"[用户] {text}")
 
         elif role == "assistant":
-            # assistant 消息：只取文本块的前 ASSISTANT_PREVIEW 字
             if isinstance(content, list):
-                texts = []
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "text":
-                        texts.append(c.get("text", ""))
+                texts = [c.get("text", "") for c in content
+                         if isinstance(c, dict) and c.get("type") == "text"]
                 text = " ".join(texts).strip()
             else:
                 text = str(content).strip()
@@ -127,7 +103,6 @@ def extract_context(transcript_path):
 
 
 def call_llm(context):
-    """调用 Haiku 生成 Bramblewick 的碎碎念"""
     api_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     model = os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001")
@@ -184,49 +159,53 @@ def call_llm(context):
         return None
 
 
-def main():
+def cmd_tick():
+    """UserPromptSubmit hook 调用：计数+1，到阈值时生成新话"""
     cwd = os.environ.get("PWD", os.getcwd())
     state = load_state()
-    elapsed = seconds_since_last(state)
 
-    # 未到触发时间 → 直接输出缓存
-    if elapsed < INTERVAL_SECONDS:
-        cached = state.get("last_text", "")
-        if cached:
-            print(cached)
+    count = state.get("input_count", 0) + 1
+    next_trigger = state.get("next_trigger", random.randint(2, 5))
+
+    if count < next_trigger:
+        # 未到阈值，只更新计数
+        state["input_count"] = count
+        state["next_trigger"] = next_trigger
+        save_state(state)
         return
 
-    # 到时间了 → 读 transcript，生成新话
+    # 到阈值了，生成新话
     transcript = find_latest_transcript(cwd)
-    if not transcript:
-        # 没有 transcript，静默
-        cached = state.get("last_text", "")
-        if cached:
-            print(cached)
-        return
+    if transcript:
+        context = extract_context(transcript)
+        if context:
+            text = call_llm(context)
+            if text:
+                state["pending_text"] = text
 
-    context = extract_context(transcript)
-    if not context:
-        cached = state.get("last_text", "")
-        if cached:
-            print(cached)
-        return
+    # 重置计数，随机下一个阈值
+    state["input_count"] = 0
+    state["next_trigger"] = random.randint(2, 5)
+    save_state(state)
 
-    text = call_llm(context)
-    if not text:
-        # LLM 失败，保留缓存
-        cached = state.get("last_text", "")
-        if cached:
-            print(cached)
-        return
 
-    save_state(text)
-    print(text)
+def cmd_show():
+    """statusLine 调用：取走 pending_text，取后立即清空"""
+    state = load_state()
+    text = state.get("pending_text", "")
+    if text:
+        # 清空，下次不再展示
+        state["pending_text"] = ""
+        save_state(state)
+        print(text)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        mode = sys.argv[1] if len(sys.argv) > 1 else "show"
+        if mode == "tick":
+            cmd_tick()
+        else:
+            cmd_show()
     except Exception:
-        # 任何未捕获异常都静默，不破坏 statusLine
         pass
